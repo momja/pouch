@@ -1,0 +1,73 @@
+package server
+
+import (
+	"io/fs"
+	"net/http"
+	"time"
+
+	"github.com/Strubbl/wallabago/v9"
+	"github.com/momja/pouch/web"
+)
+
+// Server wires Pouch's HTTP API and the embedded frontend together.
+type Server struct {
+	cfg    Config
+	static fs.FS
+}
+
+// New configures the wallabago client and returns a ready-to-run http.Server.
+func New(cfg Config) *http.Server {
+	wallabago.SetConfig(wallabago.NewWallabagConfig(
+		cfg.WallabagURL,
+		cfg.WallabagClientID,
+		cfg.WallabagClientSecret,
+		cfg.WallabagUsername,
+		cfg.WallabagPassword,
+	))
+
+	staticFS, err := fs.Sub(web.Static, "static")
+	if err != nil {
+		panic(err)
+	}
+	s := &Server{cfg: cfg, static: staticFS}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /api/entries", s.handleListEntries)
+	mux.HandleFunc("POST /api/entries", s.handleCreateEntry)
+	mux.HandleFunc("GET /api/entries/{id}", s.handleGetEntry)
+	mux.HandleFunc("PATCH /api/entries/{id}", s.handlePatchEntry)
+	mux.HandleFunc("DELETE /api/entries/{id}", s.handleDeleteEntry)
+	mux.HandleFunc("GET /api/tags", s.handleTags)
+	mux.HandleFunc("GET /api/quick-add", s.handleQuickAdd)
+	mux.HandleFunc("/", s.handleStatic)
+
+	return &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte("ok"))
+}
+
+// handleStatic serves the embedded frontend. Unknown paths fall back to
+// index.html so client-side routes (e.g. /add from the share target) work.
+func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	p := r.URL.Path[1:]
+	if p != "" {
+		if f, err := s.static.Open(p); err == nil {
+			f.Close()
+			http.ServeFileFS(w, r, s.static, p)
+			return
+		}
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; img-src * data: blob:; media-src *; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'")
+	http.ServeFileFS(w, r, s.static, "index.html")
+}

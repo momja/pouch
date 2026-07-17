@@ -1,0 +1,25 @@
+# Example deployment behind a Traefik reverse proxy.
+# Copy next to a .env file providing the WALLABAG_* variables.
+services:
+  pouch:
+    build: https://github.com/momja/pouch.git
+    container_name: pouch
+    restart: unless-stopped
+    environment:
+      - WALLABAG_URL=${WALLABAG_URL}
+      - WALLABAG_CLIENT_ID=${WALLABAG_CLIENT_ID}
+      - WALLABAG_CLIENT_SECRET=${WALLABAG_CLIENT_SECRET}
+      - WALLABAG_USERNAME=${WALLABAG_USERNAME}
+      - WALLABAG_PASSWORD=${WALLABAG_PASSWORD}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.pouch.rule=Host(`pouch.example.com`)
+      - traefik.http.routers.pouch.entrypoints=websecure
+      - traefik.http.routers.pouch.tls.certresolver=letsencrypt
+      - traefik.http.services.pouch.loadbalancer.server.port=8080
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true

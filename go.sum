@@ -1,0 +1,4 @@
+github.com/Strubbl/wallabago/v9 v9.0.25 h1:RCCzwx2mkS93hwdZiUnVU6HYkLWD4L3rmCOhesD/0xk=
+github.com/Strubbl/wallabago/v9 v9.0.25/go.mod h1:0sW+93Vdqyg6ZfRO58XxNkFQqXvESKcbG10/Mx4B4VE=
+golang.org/x/text v0.38.0 h1:sXmwo9DwP3OK9EZ7PqAdaooSGozfl/3a6/xJcbzPRhE=
+golang.org/x/text v0.38.0/go.mod h1:YXZt3QhHUKYT53r2lLKFIVi6Ao1jdzrTR/KQ09qyxF4=

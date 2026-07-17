@@ -1,0 +1,560 @@
+/* Pouch frontend — dependency-free SPA over Pouch's REST API. */
+
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => [...document.querySelectorAll(sel)];
+
+const VERSION = "1.0.0";
+const PER_PAGE = 30;
+
+const FILTERS = {
+  unread: { title: "Unread", emptyTitle: "The pouch is empty", emptyText: "Save a link to start reading." },
+  starred: { title: "Starred", emptyTitle: "No stars yet", emptyText: "Star articles you love to find them here." },
+  archive: { title: "Archive", emptyTitle: "Nothing archived", emptyText: "Finished reads land here." },
+  all: { title: "Everything", emptyTitle: "Nothing saved yet", emptyText: "Save your first link to get going." },
+};
+
+const state = {
+  filter: "unread",
+  tag: null,
+  query: "",
+  items: [],
+  page: 1,
+  pages: 1,
+  total: 0,
+  loading: false,
+  current: null, // entry open in the reader
+  aborter: null,
+};
+
+/* ---------- Preferences ---------- */
+
+const PREF_KEY = "pouch:prefs";
+const defaultPrefs = { theme: "paper", font: "serif", size: 18, lh: 17, measure: 42 };
+let prefs = { ...defaultPrefs };
+try {
+  prefs = { ...defaultPrefs, ...JSON.parse(localStorage.getItem(PREF_KEY) || "{}") };
+} catch { /* corrupted prefs -> defaults */ }
+
+function savePrefs() {
+  localStorage.setItem(PREF_KEY, JSON.stringify(prefs));
+}
+
+function applyPrefs() {
+  const root = document.documentElement;
+  root.dataset.theme = prefs.theme;
+  root.style.setProperty("--reader-font", `var(--font-${prefs.font})`);
+  root.style.setProperty("--reader-size", `${prefs.size}px`);
+  root.style.setProperty("--reader-lh", (prefs.lh / 10).toFixed(1));
+  root.style.setProperty("--measure", `${prefs.measure}rem`);
+  const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
+  $('meta[name="theme-color"]').setAttribute("content", bg);
+  syncPrefControls();
+}
+
+function syncPrefControls() {
+  $$("[data-theme-pick]").forEach((b) => b.classList.toggle("active", b.dataset.themePick === prefs.theme));
+  $$(".pill[data-font]").forEach((b) => b.classList.toggle("active", b.dataset.font === prefs.font));
+  $$(".pill[data-measure]").forEach((b) => b.classList.toggle("active", Number(b.dataset.measure) === prefs.measure));
+  for (const id of ["sizeRange", "typoSizeRange"]) $(`#${id}`).value = prefs.size;
+  for (const id of ["lhRange", "typoLhRange"]) $(`#${id}`).value = prefs.lh;
+  $("#sizeLabel").textContent = `${prefs.size}px`;
+  $("#lhLabel").textContent = (prefs.lh / 10).toFixed(1);
+}
+
+function bindPrefControls() {
+  document.addEventListener("click", (e) => {
+    const swatch = e.target.closest("[data-theme-pick]");
+    if (swatch) { prefs.theme = swatch.dataset.themePick; savePrefs(); applyPrefs(); return; }
+    const font = e.target.closest(".pill[data-font]");
+    if (font) { prefs.font = font.dataset.font; savePrefs(); applyPrefs(); return; }
+    const measure = e.target.closest(".pill[data-measure]");
+    if (measure) { prefs.measure = Number(measure.dataset.measure); savePrefs(); applyPrefs(); }
+  });
+  for (const id of ["sizeRange", "typoSizeRange"]) {
+    $(`#${id}`).addEventListener("input", (e) => { prefs.size = Number(e.target.value); savePrefs(); applyPrefs(); });
+  }
+  for (const id of ["lhRange", "typoLhRange"]) {
+    $(`#${id}`).addEventListener("input", (e) => { prefs.lh = Number(e.target.value); savePrefs(); applyPrefs(); });
+  }
+}
+
+/* ---------- API ---------- */
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: opts.body ? { "Content-Type": "application/json" } : {},
+    ...opts,
+  });
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
+  return data;
+}
+
+/* ---------- Helpers ---------- */
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 90) return "just now";
+  const units = [[31536000, "y"], [2592000, "mo"], [604800, "w"], [86400, "d"], [3600, "h"], [60, "m"]];
+  for (const [sec, label] of units) {
+    if (s >= sec) return `${Math.floor(s / sec)}${label} ago`;
+  }
+  return "just now";
+}
+
+function toast(msg, ms = 2600) {
+  const el = $("#toast");
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.hidden = true; }, ms);
+}
+
+/* Strip scripts/handlers from wallabag content and polish media/links. */
+function sanitize(html) {
+  const doc = new DOMParser().parseFromString(html || "", "text/html");
+  doc.querySelectorAll("script, iframe, object, embed, form, link, meta").forEach((n) => n.remove());
+  doc.querySelectorAll("*").forEach((n) => {
+    for (const attr of [...n.attributes]) {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith("on")) n.removeAttribute(attr.name);
+      if ((name === "href" || name === "src") && attr.value.trim().toLowerCase().startsWith("javascript:")) {
+        n.removeAttribute(attr.name);
+      }
+    }
+  });
+  doc.querySelectorAll("img").forEach((img) => {
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    img.removeAttribute("width");
+    img.removeAttribute("height");
+  });
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+  });
+  return doc.body.innerHTML;
+}
+
+/* ---------- List ---------- */
+
+function visibleItems() {
+  const q = state.query.trim().toLowerCase();
+  if (!q) return state.items;
+  return state.items.filter((it) =>
+    it.title.toLowerCase().includes(q) || it.domain.toLowerCase().includes(q) ||
+    it.tags.some((t) => t.toLowerCase().includes(q)));
+}
+
+function cardHTML(it) {
+  const meta = [
+    it.domain && `<span>${esc(it.domain)}</span>`,
+    it.readingTime > 0 && `<span class="dot"></span><span>${it.readingTime} min</span>`,
+    it.createdAt && `<span class="dot"></span><span>${timeAgo(it.createdAt)}</span>`,
+  ].filter(Boolean).join("");
+  const tags = it.tags.length
+    ? `<div class="card-tags">${it.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join("")}</div>` : "";
+  const thumb = it.preview
+    ? `<img class="thumb" src="${esc(it.preview)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : "";
+  return `<article class="card${it.archived ? " archived" : ""}" data-id="${it.id}" tabindex="0" role="button" aria-label="${esc(it.title)}">
+    <div class="card-body">
+      <h2 class="card-title">${esc(it.title)}</h2>
+      <div class="card-meta">${meta}</div>
+      ${tags}
+    </div>
+    <div class="card-side">
+      ${thumb}
+      <div class="card-actions">
+        <button class="icon-btn${it.starred ? " on" : ""}" data-action="star" title="${it.starred ? "Unstar" : "Star"}"><svg class="icon"><use href="#i-star"/></svg></button>
+        <button class="icon-btn${it.archived ? " on" : ""}" data-action="archive" title="${it.archived ? "Move to unread" : "Archive"}"><svg class="icon"><use href="#i-archive"/></svg></button>
+        <button class="icon-btn" data-action="delete" title="Delete"><svg class="icon"><use href="#i-trash"/></svg></button>
+      </div>
+    </div>
+  </article>`;
+}
+
+function renderList() {
+  const items = visibleItems();
+  $("#entryList").innerHTML = items.map(cardHTML).join("");
+  const empty = items.length === 0 && !state.loading;
+  $("#emptyState").hidden = !empty;
+  if (empty) {
+    const f = FILTERS[state.filter];
+    $("#emptyTitle").textContent = state.query ? "No matches" : f.emptyTitle;
+    $("#emptyText").textContent = state.query ? "Try a different filter." : f.emptyText;
+  }
+  $("#loadMore").hidden = state.page >= state.pages || state.loading;
+  $("#listCount").textContent = state.total > 0 ? String(state.total) : "";
+}
+
+async function loadEntries(reset = true) {
+  if (state.aborter) state.aborter.abort();
+  const aborter = new AbortController();
+  state.aborter = aborter;
+  if (reset) {
+    state.items = [];
+    state.page = 1;
+    state.total = 0;
+    renderList();
+  }
+  state.loading = true;
+  $("#listStatus").hidden = false;
+  try {
+    const params = new URLSearchParams({ filter: state.filter, page: state.page, perPage: PER_PAGE });
+    if (state.tag) params.set("tag", state.tag);
+    const data = await api(`/api/entries?${params}`, { signal: aborter.signal });
+    if (aborter.signal.aborted) return;
+    state.items = state.page === 1 ? data.items : state.items.concat(data.items);
+    state.pages = data.pages;
+    state.total = data.total;
+  } catch (err) {
+    if (aborter.signal.aborted) return;
+    toast(`Couldn't load entries: ${err.message}`);
+  } finally {
+    if (!aborter.signal.aborted) {
+      state.loading = false;
+      $("#listStatus").hidden = true;
+      renderList();
+    }
+  }
+}
+
+async function refreshCounts() {
+  for (const f of ["unread", "starred", "archive", "all"]) {
+    api(`/api/entries?filter=${f}&perPage=1`)
+      .then((d) => { $(`[data-count="${f}"]`).textContent = d.total > 0 ? d.total : ""; })
+      .catch(() => {});
+  }
+}
+
+async function loadTags() {
+  try {
+    const tags = await api("/api/tags");
+    $("#tagsBlock").hidden = tags.length === 0;
+    $("#tagList").innerHTML = tags
+      .map((t) => `<button class="chip${state.tag === t.label ? " active" : ""}" data-tag="${esc(t.label)}">${esc(t.label)}</button>`)
+      .join("");
+  } catch { /* tags are decorative; ignore failures */ }
+}
+
+function setTag(tag) {
+  state.tag = tag;
+  const bar = $("#activeTag");
+  if (tag) {
+    bar.hidden = false;
+    bar.innerHTML = `Filtering by <span class="chip active" style="pointer-events:none">${esc(tag)}</span>
+      <button class="btn-ghost" id="clearTag" style="padding:0.2rem 0.7rem;font-size:0.8rem">Clear</button>`;
+    $("#clearTag").onclick = () => { setTag(null); loadEntries(); loadTags(); };
+  } else {
+    bar.hidden = true;
+    bar.innerHTML = "";
+  }
+  loadTags();
+}
+
+/* ---------- Entry actions (shared by list + reader) ---------- */
+
+function itemById(id) {
+  return state.items.find((it) => it.id === id) || (state.current?.id === id ? state.current : null);
+}
+
+function applyItemUpdate(updated) {
+  const idx = state.items.findIndex((it) => it.id === updated.id);
+  const matchesFilter =
+    (state.filter === "unread" && !updated.archived) ||
+    (state.filter === "archive" && updated.archived) ||
+    (state.filter === "starred" && updated.starred) ||
+    state.filter === "all";
+  if (idx >= 0) {
+    if (matchesFilter) state.items[idx] = { ...state.items[idx], ...updated };
+    else { state.items.splice(idx, 1); state.total = Math.max(0, state.total - 1); }
+  }
+  if (state.current?.id === updated.id) {
+    state.current = { ...state.current, ...updated };
+    syncReaderButtons();
+  }
+  renderList();
+  refreshCounts();
+}
+
+async function toggleStar(id) {
+  const it = itemById(id);
+  if (!it) return;
+  try {
+    const updated = await api(`/api/entries/${id}`, { method: "PATCH", body: JSON.stringify({ starred: it.starred ? 0 : 1 }) });
+    applyItemUpdate(updated);
+    toast(updated.starred ? "Starred" : "Star removed");
+  } catch (err) { toast(`Failed: ${err.message}`); }
+}
+
+async function toggleArchive(id) {
+  const it = itemById(id);
+  if (!it) return;
+  try {
+    const updated = await api(`/api/entries/${id}`, { method: "PATCH", body: JSON.stringify({ archive: it.archived ? 0 : 1 }) });
+    applyItemUpdate(updated);
+    toast(updated.archived ? "Archived" : "Moved to unread");
+  } catch (err) { toast(`Failed: ${err.message}`); }
+}
+
+/* Two-step delete: first tap arms the button, second tap within 3s deletes. */
+function requestDelete(id, btn) {
+  if (btn.dataset.armed) { doDelete(id); return; }
+  btn.dataset.armed = "1";
+  btn.style.color = "var(--accent)";
+  btn.title = "Tap again to delete";
+  toast("Tap delete again to confirm");
+  setTimeout(() => { delete btn.dataset.armed; btn.style.color = ""; btn.title = "Delete"; }, 3000);
+}
+
+async function doDelete(id) {
+  try {
+    await api(`/api/entries/${id}`, { method: "DELETE" });
+    state.items = state.items.filter((it) => it.id !== id);
+    state.total = Math.max(0, state.total - 1);
+    if (state.current?.id === id) closeReader();
+    renderList();
+    refreshCounts();
+    toast("Deleted");
+  } catch (err) { toast(`Failed: ${err.message}`); }
+}
+
+/* ---------- Reader ---------- */
+
+function syncReaderButtons() {
+  const it = state.current;
+  if (!it) return;
+  $("#starBtn").classList.toggle("on", it.starred);
+  $("#starBtn").title = it.starred ? "Unstar" : "Star";
+  $("#archiveBtn").classList.toggle("on", it.archived);
+  $("#archiveBtn").title = it.archived ? "Move to unread" : "Archive";
+}
+
+async function openReader(id) {
+  const readerEl = $("#reader");
+  readerEl.hidden = false;
+  document.body.style.overflow = "hidden";
+  $("#artTitle").textContent = "";
+  $("#artMeta").innerHTML = "";
+  $("#artTags").innerHTML = "";
+  $("#artContent").innerHTML = '<div class="spinner" style="margin:3rem auto"></div>';
+  try {
+    const it = await api(`/api/entries/${id}`);
+    state.current = it;
+    $("#artTitle").textContent = it.title;
+    const bits = [];
+    if (it.domain) bits.push(`<a href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${esc(it.domain)}</a>`);
+    if (it.readingTime > 0) bits.push(`<span class="dot"></span><span>${it.readingTime} min read</span>`);
+    if (it.createdAt) bits.push(`<span class="dot"></span><span>saved ${timeAgo(it.createdAt)}</span>`);
+    $("#artMeta").innerHTML = bits.join("");
+    $("#artTags").innerHTML = it.tags.map((t) => `<span class="chip" style="pointer-events:none">${esc(t)}</span>`).join("");
+    $("#openOriginal").href = it.url;
+    $("#artContent").innerHTML = sanitize(it.content) || `<p class="muted">No stored content. <a href="${esc(it.url)}" target="_blank" rel="noopener">Read the original ↗</a></p>`;
+    syncReaderButtons();
+    readerEl.scrollTop = 0;
+  } catch (err) {
+    $("#artContent").innerHTML = `<p class="muted">Couldn't load this entry: ${esc(err.message)}</p>`;
+  }
+}
+
+function closeReader() {
+  $("#reader").hidden = true;
+  $("#typoPanel").hidden = true;
+  document.body.style.overflow = "";
+  state.current = null;
+  if (location.hash.startsWith("#/read/")) {
+    history.replaceState(null, "", `#/${state.filter}`);
+  }
+}
+
+/* ---------- Add flow ---------- */
+
+function openAddDialog(url = "", tags = "") {
+  $("#addUrl").value = url;
+  $("#addTags").value = tags;
+  $("#addDialog").showModal();
+}
+
+async function submitAdd(url, tags) {
+  const btn = $("#addSubmit");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const created = await api("/api/entries", { method: "POST", body: JSON.stringify({ url, tags }) });
+    $("#addDialog").close();
+    if (state.filter === "unread" || state.filter === "all") {
+      state.items.unshift(created);
+      state.total += 1;
+      renderList();
+    }
+    refreshCounts();
+    loadTags();
+    toast(`Saved: ${created.title}`);
+  } catch (err) {
+    toast(`Couldn't save: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Save";
+  }
+}
+
+/* Handle the PWA share target (GET /add?url=…&text=…&title=…). */
+function handleShareTarget() {
+  if (location.pathname !== "/add") return;
+  const params = new URLSearchParams(location.search);
+  const fields = [params.get("url"), params.get("text"), params.get("title")];
+  let shared = "";
+  for (const f of fields) {
+    const m = (f || "").match(/https?:\/\/\S+/);
+    if (m) { shared = m[0]; break; }
+  }
+  history.replaceState(null, "", "/#/unread");
+  if (shared) {
+    submitAdd(shared, "");
+  } else {
+    openAddDialog(fields.find(Boolean) || "");
+  }
+}
+
+/* ---------- Routing ---------- */
+
+function route() {
+  const hash = location.hash || "#/unread";
+  if (hash.startsWith("#/read/")) {
+    const id = Number(hash.slice(7));
+    if (id) openReader(id);
+    return;
+  }
+  if (!$("#reader").hidden) closeReader();
+  const name = hash.slice(2) || "unread";
+  const isSettings = name === "settings";
+  $("#settingsView").hidden = !isSettings;
+  $("#listView").hidden = isSettings;
+  $$("[data-route]").forEach((el) => el.classList.toggle("active", el.dataset.route === name));
+  if (!isSettings) {
+    const known = FILTERS[name] ? name : "unread";
+    const changed = state.filter !== known;
+    state.filter = known;
+    $("#listTitle").textContent = FILTERS[known].title;
+    if (changed || state.items.length === 0) {
+      state.query = "";
+      $("#searchInput").value = "";
+      loadEntries();
+    }
+  }
+}
+
+/* ---------- Setup ---------- */
+
+function bindEvents() {
+  window.addEventListener("hashchange", route);
+
+  $("#addBtn").onclick = () => openAddDialog();
+  $("#addBtnMobile").onclick = () => openAddDialog();
+  $("#addCancel").onclick = () => $("#addDialog").close();
+  $("#addForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    submitAdd($("#addUrl").value.trim(), $("#addTags").value.trim());
+  });
+
+  $$(".tabbar [data-route]").forEach((btn) => {
+    btn.onclick = () => { location.hash = `#/${btn.dataset.route}`; };
+  });
+
+  $("#entryList").addEventListener("click", (e) => {
+    const actionBtn = e.target.closest("[data-action]");
+    const card = e.target.closest(".card");
+    if (!card) return;
+    const id = Number(card.dataset.id);
+    if (actionBtn) {
+      e.stopPropagation();
+      if (actionBtn.dataset.action === "star") toggleStar(id);
+      else if (actionBtn.dataset.action === "archive") toggleArchive(id);
+      else if (actionBtn.dataset.action === "delete") requestDelete(id, actionBtn);
+      return;
+    }
+    location.hash = `#/read/${id}`;
+  });
+  $("#entryList").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.classList.contains("card")) {
+      location.hash = `#/read/${e.target.dataset.id}`;
+    }
+  });
+
+  $("#tagList").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-tag]");
+    if (!chip) return;
+    setTag(state.tag === chip.dataset.tag ? null : chip.dataset.tag);
+    if (!FILTERS[state.filter]) location.hash = "#/all";
+    else loadEntries();
+  });
+
+  $("#searchInput").addEventListener("input", (e) => {
+    state.query = e.target.value;
+    renderList();
+  });
+
+  $("#loadMore").onclick = () => {
+    if (state.page < state.pages && !state.loading) {
+      state.page += 1;
+      loadEntries(false);
+    }
+  };
+  new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) $("#loadMore").click();
+  }).observe($("#loadMore"));
+
+  $("#backBtn").onclick = () => closeReader();
+  $("#starBtn").onclick = () => state.current && toggleStar(state.current.id);
+  $("#archiveBtn").onclick = () => state.current && toggleArchive(state.current.id);
+  $("#deleteBtn").onclick = (e) => state.current && requestDelete(state.current.id, e.currentTarget);
+  $("#typoBtn").onclick = (e) => {
+    e.stopPropagation();
+    $("#typoPanel").hidden = !$("#typoPanel").hidden;
+  };
+  $("#reader").addEventListener("click", (e) => {
+    if (!$("#typoPanel").hidden && !e.target.closest(".typo-panel") && !e.target.closest("#typoBtn")) {
+      $("#typoPanel").hidden = true;
+    }
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      if (!$("#typoPanel").hidden) { $("#typoPanel").hidden = true; return; }
+      if (!$("#reader").hidden) closeReader();
+      return;
+    }
+    const typing = /^(input|textarea|select)$/i.test(document.activeElement?.tagName || "") || $("#addDialog").open;
+    if (typing) return;
+    if (e.key === "a") { e.preventDefault(); openAddDialog(); }
+    if (e.key === "/") { e.preventDefault(); $("#searchInput").focus(); }
+  });
+}
+
+function initSetupHelpers() {
+  const origin = location.origin;
+  $("#quickAddURL").textContent = `${origin}/api/quick-add?url=`;
+  const bm = $("#bookmarklet");
+  bm.href = `javascript:void(window.open('${origin}/api/quick-add?url='+encodeURIComponent(location.href),'_blank','noopener'))`;
+  bm.onclick = (e) => e.preventDefault();
+  $("#versionInfo").textContent = `v${VERSION}.`;
+}
+
+applyPrefs();
+bindPrefControls();
+bindEvents();
+initSetupHelpers();
+handleShareTarget();
+route();
+refreshCounts();
+loadTags();
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
