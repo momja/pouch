@@ -52,9 +52,11 @@ sips -z 180 180 icon-512.png --out apple-touch-icon.png
 
 ## Service worker gotcha
 
-`sw.js` precaches the shell under cache name `pouch-v1`. Navigations are
-network-first so deploys appear immediately, but if you change the SHELL list or
-need a hard cut, bump the cache name.
+`sw.js` is **network-first for everything** (cache is only an offline
+fallback), so deploys show up on the next reload. History: v1 used
+stale-while-revalidate for assets, which served a one-deploy-old app.js and
+broke a feature test — don't reintroduce cache-first without a cache-busting
+scheme. Bump the `CACHE` name when changing the SHELL list or the strategy.
 
 ## Deployment
 

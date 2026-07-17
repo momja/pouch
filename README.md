@@ -24,6 +24,10 @@ no frontend frameworks, no build step.
   - **In-app dialog** (`a` key, or the big button).
 - **The usual Wallabag verbs** — unread/starred/archive lists, tag filtering,
   star/archive/delete, pagination, client-side filtering.
+- **Finish detection** — scrolling to the end of an article marks it read
+  (archives it). Toggleable in Settings → Reading.
+- **Broken-article bounce** — when Wallabag stored only its "can't retrieve
+  contents" placeholder, opening the entry redirects straight to the source URL.
 - **Installable PWA** with offline app shell.
 - Cross-platform: it's a web app — anything with a browser, desktop or mobile.
 

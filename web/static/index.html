@@ -112,6 +112,15 @@
         </section>
 
         <section class="settings-section">
+          <h2>Reading</h2>
+          <label class="switch-row" for="autoArchiveToggle">
+            <span class="switch-text">Mark as read when you finish<span class="hint">Automatically archives an article once you scroll to its end.</span></span>
+            <input type="checkbox" id="autoArchiveToggle">
+            <span class="switch"></span>
+          </label>
+        </section>
+
+        <section class="settings-section">
           <h2>Saving links</h2>
           <h3>From iOS (share sheet)</h3>
           <p>Add Pouch to your iPhone's share sheet with a one-time Shortcut:</p>
@@ -202,6 +211,7 @@
         <div class="art-tags" id="artTags"></div>
       </header>
       <div class="prose" id="artContent"></div>
+      <div id="artEnd" aria-hidden="true"></div>
     </article>
   </section>
 

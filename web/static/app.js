@@ -3,7 +3,7 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const PER_PAGE = 30;
 
 const FILTERS = {
@@ -29,7 +29,7 @@ const state = {
 /* ---------- Preferences ---------- */
 
 const PREF_KEY = "pouch:prefs";
-const defaultPrefs = { theme: "paper", font: "serif", size: 18, lh: 17, measure: 42 };
+const defaultPrefs = { theme: "paper", font: "serif", size: 18, lh: 17, measure: 42, autoArchive: true };
 let prefs = { ...defaultPrefs };
 try {
   prefs = { ...defaultPrefs, ...JSON.parse(localStorage.getItem(PREF_KEY) || "{}") };
@@ -59,6 +59,7 @@ function syncPrefControls() {
   for (const id of ["lhRange", "typoLhRange"]) $(`#${id}`).value = prefs.lh;
   $("#sizeLabel").textContent = `${prefs.size}px`;
   $("#lhLabel").textContent = (prefs.lh / 10).toFixed(1);
+  $("#autoArchiveToggle").checked = prefs.autoArchive;
 }
 
 function bindPrefControls() {
@@ -76,6 +77,12 @@ function bindPrefControls() {
   for (const id of ["lhRange", "typoLhRange"]) {
     $(`#${id}`).addEventListener("input", (e) => { prefs.lh = Number(e.target.value); savePrefs(); applyPrefs(); });
   }
+  $("#autoArchiveToggle").addEventListener("change", (e) => {
+    prefs.autoArchive = e.target.checked;
+    savePrefs();
+    if (prefs.autoArchive) armFinishDetection();
+    else disarmFinishDetection();
+  });
 }
 
 /* ---------- API ---------- */
@@ -327,6 +334,51 @@ async function doDelete(id) {
 
 /* ---------- Reader ---------- */
 
+/* Finish detection: a sentinel after the article content is watched with an
+   IntersectionObserver; reaching it archives the entry ("mark read when you
+   finish"). Armed 2s after open so a quick peek never marks anything. */
+let finishObserver = null;
+let finishTimer = null;
+
+function disarmFinishDetection() {
+  clearTimeout(finishTimer);
+  finishTimer = null;
+  if (finishObserver) finishObserver.disconnect();
+  finishObserver = null;
+}
+
+function armFinishDetection() {
+  disarmFinishDetection();
+  const it = state.current;
+  if (!prefs.autoArchive || !it || it.archived || $("#reader").hidden) return;
+  finishTimer = setTimeout(() => {
+    finishObserver = new IntersectionObserver((entries) => {
+      if (!entries[0].isIntersecting) return;
+      const cur = state.current;
+      if (!cur || cur.archived || !prefs.autoArchive) return;
+      disarmFinishDetection();
+      autoArchive(cur.id);
+    }, { root: $("#reader") });
+    finishObserver.observe($("#artEnd"));
+  }, 2000);
+}
+
+async function autoArchive(id) {
+  try {
+    const updated = await api(`/api/entries/${id}`, { method: "PATCH", body: JSON.stringify({ archive: 1 }) });
+    applyItemUpdate(updated);
+    toast("Marked as read");
+  } catch { /* keep quiet; the archive button still works */ }
+}
+
+/* Wallabag stores a placeholder body when it couldn't fetch a page
+   ("wallabag can't retrieve contents for this article…"). */
+function looksUnretrieved(html) {
+  const text = new DOMParser().parseFromString(html || "", "text/html").body.textContent.trim();
+  return text.length < 600 &&
+    /(can.{0,2}t|cannot|unable to) retrieve (the )?(full )?contents?/i.test(text);
+}
+
 function syncReaderButtons() {
   const it = state.current;
   if (!it) return;
@@ -346,6 +398,12 @@ async function openReader(id) {
   $("#artContent").innerHTML = '<div class="spinner" style="margin:3rem auto"></div>';
   try {
     const it = await api(`/api/entries/${id}`);
+    if (looksUnretrieved(it.content)) {
+      // Wallabag has no readable copy — bounce straight to the source.
+      closeReader();
+      window.location.href = it.url;
+      return;
+    }
     state.current = it;
     $("#artTitle").textContent = it.title;
     const bits = [];
@@ -358,12 +416,14 @@ async function openReader(id) {
     $("#artContent").innerHTML = sanitize(it.content) || `<p class="muted">No stored content. <a href="${esc(it.url)}" target="_blank" rel="noopener">Read the original ↗</a></p>`;
     syncReaderButtons();
     readerEl.scrollTop = 0;
+    armFinishDetection();
   } catch (err) {
     $("#artContent").innerHTML = `<p class="muted">Couldn't load this entry: ${esc(err.message)}</p>`;
   }
 }
 
 function closeReader() {
+  disarmFinishDetection();
   $("#reader").hidden = true;
   $("#typoPanel").hidden = true;
   document.body.style.overflow = "";
@@ -429,6 +489,8 @@ function route() {
   if (hash.startsWith("#/read/")) {
     const id = Number(hash.slice(7));
     if (id) openReader(id);
+    // Direct link (or redirect bounce-back): hydrate the list behind the reader.
+    if (state.items.length === 0 && !state.loading) loadEntries();
     return;
   }
   if (!$("#reader").hidden) closeReader();

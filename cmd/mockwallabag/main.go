@@ -111,6 +111,11 @@ func seed(s *store) {
 			para("The practical upshot is humble: when you are stuck, stop. The brain that returns to the problem tomorrow will not be the one that left it tonight."),
 	})
 	s.add(&entryRec{
+		Title: "Paywalled: The Economics of Attention", URL: "https://example.com/", DomainName: "example.com",
+		CreatedAt: at(0), ReadingTime: 0,
+		Content: "<p>wallabag can't retrieve contents for this article. Please troubleshoot this issue.</p>",
+	})
+	s.add(&entryRec{
 		Title: "A Field Guide to the Small Web", URL: "https://example.blog/small-web-field-guide", DomainName: "example.blog",
 		CreatedAt: at(1), ReadingTime: 12, PreviewPicture: "https://picsum.photos/seed/pouch2/640/400",
 		Tags: mkTags("web", "essays"),

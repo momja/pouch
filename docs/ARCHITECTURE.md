@@ -22,7 +22,7 @@ web/
     index.html             Full markup for every view + inline SVG icon sprite
     style.css              Hand-rolled design system (themes as CSS vars)
     app.js                 SPA: hash router, state, rendering, prefs
-    sw.js                  Service worker (precache shell, network-first nav)
+    sw.js                  Service worker (network-first, cache = offline fallback)
     manifest.webmanifest   PWA manifest incl. share_target
     icons/                 icon.svg + PNGs rendered from it
 Dockerfile                 Two-stage build → alpine, non-root, healthcheck
@@ -96,6 +96,16 @@ No frameworks, no build step. `app.js` is an ES module with:
   `target=_blank rel=noopener` on links. CSP is the second layer.
 - **Delete is two-step** (tap once to arm, tap again ≤3 s) instead of
   `window.confirm`, to avoid blocking modals.
+- **Finish detection** (`armFinishDetection` in `app.js`): an
+  IntersectionObserver on the `#artEnd` sentinel (root = the reader's scroll
+  container) archives the open entry when the reader reaches the end. It arms
+  2 s after open so a quick peek/back never marks anything, and is gated by the
+  `autoArchive` preference (Settings → Reading, default on).
+- **Unretrievable-content redirect** (`looksUnretrieved`): Wallabag stores a
+  placeholder body when it fails to fetch a page ("wallabag can't retrieve
+  contents for this article"). `openReader` detects it (short text + regex on
+  retrieve-failure phrasings), closes the reader (restoring the list hash so
+  Back doesn't loop), and navigates to the entry's source URL instead.
 - Keyboard: `a` opens save dialog, `/` focuses filter, `Esc` closes things.
 
 ## Mock Wallabag

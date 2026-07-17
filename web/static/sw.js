@@ -1,5 +1,6 @@
-/* Pouch service worker: precache the app shell, keep API traffic live. */
-const CACHE = "pouch-v1";
+/* Pouch service worker: network-first everywhere so deploys show up
+   immediately; the cache is an offline fallback for the app shell. */
+const CACHE = "pouch-v2";
 const SHELL = ["/", "/style.css", "/app.js", "/manifest.webmanifest", "/icons/icon.svg"];
 
 self.addEventListener("install", (e) => {
@@ -17,24 +18,19 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
-  if (url.pathname.startsWith("/api/")) return; // always live
+  if (url.pathname.startsWith("/api/")) return; // always live, never cached
 
-  if (e.request.mode === "navigate") {
-    // Network first so deploys show up immediately; cached shell when offline.
-    e.respondWith(fetch(e.request).catch(() => caches.match("/")));
-    return;
-  }
-
-  // Static assets: cached copy immediately, refresh it in the background.
   e.respondWith(
-    caches.match(e.request).then((cached) => {
-      const refresh = fetch(e.request)
-        .then((res) => {
-          if (res.ok) caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
-          return res;
-        })
-        .catch(() => cached);
-      return cached || refresh;
-    })
+    fetch(e.request)
+      .then((res) => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy));
+        }
+        return res;
+      })
+      .catch(() =>
+        caches.match(e.request).then((cached) => cached || caches.match("/"))
+      )
   );
 });
