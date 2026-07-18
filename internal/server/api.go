@@ -38,6 +38,7 @@ type entry struct {
 	Archived    bool     `json:"archived"`
 	Tags        []string `json:"tags"`
 	Content     string   `json:"content,omitempty"`
+	Progress    float64  `json:"progress,omitempty"` // scroll memory, 0..1
 }
 
 func fromItem(it wallabago.Item, withContent bool) entry {
@@ -174,7 +175,9 @@ func (s *Server) handleGetEntry(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadGateway, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, fromItem(it, true))
+	e := fromItem(it, true)
+	e.Progress = s.progress.Get(id)
+	writeJSON(w, http.StatusOK, e)
 }
 
 // PATCH /api/entries/{id} {"archive": 0|1, "starred": 0|1}
@@ -236,6 +239,45 @@ func (s *Server) handleDeleteEntry(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadGateway, err)
 		return
 	}
+	s.progress.Forget(id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+/* ---------- Scroll memory ---------- */
+
+// POST /api/entries/{id}/progress {"progress": 0.42}
+// Stores the reading position (furthest-wins) and marks the entry as the
+// last-open article. Trusts the client-reported id; there is no auth anyway.
+func (s *Server) handleSetProgress(w http.ResponseWriter, r *http.Request) {
+	id, err := entryID(r)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		Progress *float64 `json:"progress"`
+	}
+	if err := readJSON(r, &req); err != nil || req.Progress == nil {
+		apiError(w, http.StatusBadRequest, fmt.Errorf("body must be {\"progress\": 0..1}"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]float64{"progress": s.progress.Set(id, *req.Progress)})
+}
+
+// GET /api/state — what the frontend needs on boot: the last-open article
+// (if any) so a fresh visit can resume it at the stored position.
+func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	var last any
+	if id, p, ok := s.progress.LastOpen(); ok {
+		last = map[string]any{"id": id, "progress": p}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"last": last})
+}
+
+// DELETE /api/state/last — the reader was closed deliberately; a fresh visit
+// should show the list again instead of resuming.
+func (s *Server) handleClearLast(w http.ResponseWriter, r *http.Request) {
+	s.progress.ClearLast()
 	w.WriteHeader(http.StatusNoContent)
 }
 

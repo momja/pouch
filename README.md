@@ -26,8 +26,16 @@ no frontend frameworks, no build step.
   star/archive/delete, pagination, client-side filtering.
 - **Finish detection** — scrolling to the end of an article marks it read
   (archives it). Toggleable in Settings → Reading.
+- **Scroll memory** — your position in each article is saved server-side
+  (as a fraction, so it transfers between devices) and restored when you reopen
+  it; a plain visit to the site resumes the article you were last reading. If
+  two browsers disagree, the furthest position wins.
+- **Reading progress** — a single quiet hairline along the bottom edge fills
+  left-to-right as you read.
 - **Broken-article bounce** — when Wallabag stored only its "can't retrieve
-  contents" placeholder, opening the entry redirects straight to the source URL.
+  contents" placeholder — or a bot wall it mistook for the page ("Access
+  Denied", Cloudflare's "Just a moment…") — opening the entry redirects
+  straight to the source URL.
 - **Installable PWA** with offline app shell.
 - Cross-platform: it's a web app — anything with a browser, desktop or mobile.
 
@@ -54,6 +62,7 @@ docker build -t pouch .
 docker run -p 8080:8080 \
   -e WALLABAG_URL=… -e WALLABAG_CLIENT_ID=… -e WALLABAG_CLIENT_SECRET=… \
   -e WALLABAG_USERNAME=… -e WALLABAG_PASSWORD=… \
+  -v pouch_data:/data \
   pouch
 ```
 
@@ -72,6 +81,7 @@ Everything is environment variables:
 | `WALLABAG_USERNAME` | yes | — | Wallabag account username |
 | `WALLABAG_PASSWORD` | yes | — | Wallabag account password |
 | `POUCH_ADDR` | no | `:8080` | Listen address |
+| `POUCH_DATA_DIR` | no | `data` (`/data` in Docker) | Where scroll memory (`progress.json`) is stored |
 
 Pouch itself has **no authentication layer** — it is designed to sit on a private
 network or behind an authenticating reverse proxy. Anyone who can reach it can read

@@ -116,6 +116,11 @@ func seed(s *store) {
 		Content: "<p>wallabag can't retrieve contents for this article. Please troubleshoot this issue.</p>",
 	})
 	s.add(&entryRec{
+		Title: "Access Denied", URL: "https://example.com/blocked", DomainName: "example.com",
+		CreatedAt: at(0), ReadingTime: 0,
+		Content: "<h1>Access Denied</h1><p>You don't have permission to access this page on this server. Reference #18.abcdef.</p>",
+	})
+	s.add(&entryRec{
 		Title: "A Field Guide to the Small Web", URL: "https://example.blog/small-web-field-guide", DomainName: "example.blog",
 		CreatedAt: at(1), ReadingTime: 12, PreviewPicture: "https://picsum.photos/seed/pouch2/640/400",
 		Tags: mkTags("web", "essays"),

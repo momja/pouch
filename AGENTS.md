@@ -19,9 +19,14 @@ WALLABAG_USERNAME=mock WALLABAG_PASSWORD=mock go run ./cmd/pouch
   `web/static/*` you must restart `cmd/pouch` to see changes.
 - Ports 8080/8081 are often taken on the dev machine — use 8090/8091.
 - Verify UI changes in a real browser (chrome-devtools MCP works well):
-  list view, reader (`#/read/2` has rich content), typo panel, `#/settings`,
-  mobile at 390×844, `/add?url=…` share-target shim, `/api/quick-add?url=…` page.
-  Watch the console for errors; there should be none.
+  list view, reader (`#/read/1` has rich content; `#/read/2` and `#/read/3`
+  must bounce to their source URLs — placeholder and bot-wall cases), typo
+  panel, `#/settings`, mobile at 390×844, `/add?url=…` share-target shim,
+  `/api/quick-add?url=…` page. Watch the console for errors; there should be
+  none. Beware same-URL/hash-only navigations: they don't reload the page, so
+  the tab keeps running the previously served app.js.
+- Local runs create `./data/progress.json` (scroll memory; gitignored) —
+  override with `POUCH_DATA_DIR`.
 
 ## Conventions
 

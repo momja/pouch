@@ -16,6 +16,7 @@ internal/server/
   config.go                Config struct + ConfigFromEnv (env vars only)
   server.go                Routes, static file serving with SPA fallback
   api.go                   REST handlers, wallabago glue, quick-add HTML page
+  progress.go              Scroll-memory store (JSON file under POUCH_DATA_DIR)
 web/
   embed.go                 //go:embed all:static → web.Static
   static/
@@ -60,7 +61,23 @@ docker-compose.example.yml Traefik-labelled reference deployment
 | `DELETE /api/entries/{id}` | Delete |
 | `GET /api/tags` | All tags |
 | `GET /api/quick-add?url=&tags=` | Save + human-friendly HTML confirmation (share sheet / bookmarklet target) |
+| `POST /api/entries/{id}/progress` `{progress: 0..1}` | Record reading position (POST, not PUT, so `sendBeacon` works) |
+| `GET /api/state` | `{last: {id, progress} \| null}` — the last-open article, for resume-on-visit |
+| `DELETE /api/state/last` | Reader closed deliberately; forget the last-open article |
 | `GET /healthz` | Liveness |
+
+### Scroll memory (`internal/server/progress.go`)
+
+Positions are stored as a **fraction of the reader's scroll range** (0..1), so
+they transfer between devices with different fonts/viewports. The store is an
+in-memory map persisted to `$POUCH_DATA_DIR/progress.json` (atomic
+write-tmp-then-rename on every update; updates are already throttled
+client-side). If the data dir is unwritable Pouch logs a warning and keeps
+positions in memory only. Conflict rule per project owner: **furthest wins** —
+`Set` never lets a stored position move backward. `GET /api/entries/{id}`
+merges the stored position into the entry JSON as `progress`. Deleting an
+entry drops its position; nothing is ever pruned otherwise (the file stays
+tiny — one number per article ever opened).
 
 There is intentionally **no auth** (per project owner's request); access control is
 the deployment's job (private network / reverse proxy).
@@ -103,9 +120,25 @@ No frameworks, no build step. `app.js` is an ES module with:
   `autoArchive` preference (Settings → Reading, default on).
 - **Unretrievable-content redirect** (`looksUnretrieved`): Wallabag stores a
   placeholder body when it fails to fetch a page ("wallabag can't retrieve
-  contents for this article"). `openReader` detects it (short text + regex on
-  retrieve-failure phrasings), closes the reader (restoring the list hash so
-  Back doesn't loop), and navigates to the entry's source URL instead.
+  contents for this article") — and sometimes "succeeds" but stored a bot wall
+  (Akamai "Access Denied", Cloudflare "Just a moment…", captcha pages).
+  `openReader` detects both (body text < 600 chars + regex over title+text),
+  clears the server's last-open state (so resume-on-visit can't loop into the
+  redirect), closes the reader, and navigates to the entry's source URL.
+  Verified against the owner's real wallabag.it library (60 entries: 9 broken
+  all caught, 0 false positives).
+- **Scroll memory** (`readerProgress`/`reportProgress` + `resumeOrRoute`):
+  the reader's scroll fraction is painted onto `#readProgress` (a 2px
+  hairline fixed to the bottom edge, `transform: scaleX`) on every frame, and
+  reported to `POST /api/entries/{id}/progress` at most every 2.5 s, plus a
+  `sendBeacon` flush on `pagehide`/`visibilitychange`. `openReader` restores
+  the stored fraction (skipped when ≥ 0.98 — finished articles restart at the
+  top) and registers the entry as last-open even if the user never scrolls.
+  `closeReader` flushes and then `DELETE /api/state/last`: a deliberate close
+  means the next plain visit shows the list. `resumeOrRoute` (boot): a visit
+  with **no hash at all** asks `/api/state` and rewrites the URL to
+  `#/read/{id}` when there's an unfinished last-open article; explicit hashes
+  and the `/add` share target are never hijacked.
 - Keyboard: `a` opens save dialog, `/` focuses filter, `Esc` closes things.
 
 ## Mock Wallabag

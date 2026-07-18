@@ -360,6 +360,23 @@ svg.icon { width: 18px; height: 18px; stroke: currentColor; stroke-width: 1.8; f
 .reader-bar .spacer { flex: 1; }
 .reader-bar .icon-btn { width: 36px; height: 36px; }
 
+/* Reading progress: a single hairline along the bottom edge that fills
+   left-to-right as you scroll. Deliberately quiet. */
+.read-progress {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  z-index: 7;
+  background: var(--accent);
+  opacity: 0.5;
+  transform: scaleX(0);
+  transform-origin: 0 50%;
+  transition: transform 0.15s linear;
+  pointer-events: none;
+}
+
 .article {
   max-width: var(--measure);
   margin: 0 auto;

@@ -8,7 +8,8 @@ import (
 
 // Config holds everything Pouch needs, sourced from environment variables.
 type Config struct {
-	Addr string
+	Addr    string
+	DataDir string
 
 	WallabagURL          string
 	WallabagClientID     string
@@ -22,6 +23,7 @@ type Config struct {
 func ConfigFromEnv() (Config, error) {
 	cfg := Config{
 		Addr:                 envOr("POUCH_ADDR", ":8080"),
+		DataDir:              envOr("POUCH_DATA_DIR", "data"),
 		WallabagURL:          strings.TrimRight(os.Getenv("WALLABAG_URL"), "/"),
 		WallabagClientID:     os.Getenv("WALLABAG_CLIENT_ID"),
 		WallabagClientSecret: os.Getenv("WALLABAG_CLIENT_SECRET"),

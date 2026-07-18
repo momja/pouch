@@ -3,7 +3,7 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const PER_PAGE = 30;
 
 const FILTERS = {
@@ -332,6 +332,51 @@ async function doDelete(id) {
   } catch (err) { toast(`Failed: ${err.message}`); }
 }
 
+/* ---------- Scroll memory ---------- */
+
+/* The reader reports how far you've scrolled — a 0..1 fraction of the scroll
+   range, so it transfers between devices — to the server, throttled. The
+   server keeps the furthest position per entry (conflict rule) and remembers
+   the last-open article so a plain visit resumes it (see resumeOrRoute). */
+const PROGRESS_DONE = 0.98; // past this, treat the article as finished
+let progressSent = 0;       // last fraction reported for the open entry
+let progressTimer = null;
+let progressRAF = 0;
+
+function readerProgress() {
+  const el = $("#reader");
+  const range = el.scrollHeight - el.clientHeight;
+  return range > 0 ? Math.min(1, Math.max(0, el.scrollTop / range)) : 1;
+}
+
+function paintProgress(p = readerProgress()) {
+  $("#readProgress").style.transform = `scaleX(${p.toFixed(4)})`;
+}
+
+function reportProgress({ beacon = false, force = false } = {}) {
+  const it = state.current;
+  if (!it) return;
+  const p = readerProgress();
+  if (!force && Math.abs(p - progressSent) < 0.01) return;
+  progressSent = p;
+  const url = `/api/entries/${it.id}/progress`;
+  const body = JSON.stringify({ progress: p });
+  if (beacon && navigator.sendBeacon) {
+    navigator.sendBeacon(url, new Blob([body], { type: "application/json" }));
+  } else {
+    fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body, keepalive: true }).catch(() => {});
+  }
+}
+
+function onReaderScroll() {
+  if (!progressRAF) {
+    progressRAF = requestAnimationFrame(() => { progressRAF = 0; paintProgress(); });
+  }
+  if (!progressTimer) {
+    progressTimer = setTimeout(() => { progressTimer = null; reportProgress(); }, 2500);
+  }
+}
+
 /* ---------- Reader ---------- */
 
 /* Finish detection: a sentinel after the article content is watched with an
@@ -372,11 +417,17 @@ async function autoArchive(id) {
 }
 
 /* Wallabag stores a placeholder body when it couldn't fetch a page
-   ("wallabag can't retrieve contents for this article…"). */
-function looksUnretrieved(html) {
-  const text = new DOMParser().parseFromString(html || "", "text/html").body.textContent.trim();
-  return text.length < 600 &&
-    /(can.{0,2}t|cannot|unable to) retrieve (the )?(full )?contents?/i.test(text);
+   ("wallabag can't retrieve contents for this article…") — and sometimes it
+   "succeeds" but what it fetched was a bot wall (Cloudflare "Just a moment",
+   Akamai "Access Denied", captcha pages). Either way there's nothing to read,
+   so the reader bounces to the source. Only short bodies qualify: a real
+   article that merely mentions these phrases is longer than 600 chars. */
+function looksUnretrieved(it) {
+  const text = new DOMParser().parseFromString(it.content || "", "text/html").body.textContent.trim();
+  if (text.length >= 600) return false;
+  const probe = `${it.title || ""}\n${text}`;
+  return /(can.{0,2}t|cannot|unable to) retrieve (the )?(full )?contents?/i.test(probe) ||
+    /\b(access denied|just a moment|bot challenge|attention required|checking your browser|verify(ing)? (that )?you are|are you a (robot|human)|captcha|don.{0,2}t have permission to access)\b/i.test(probe);
 }
 
 function syncReaderButtons() {
@@ -396,10 +447,13 @@ async function openReader(id) {
   $("#artMeta").innerHTML = "";
   $("#artTags").innerHTML = "";
   $("#artContent").innerHTML = '<div class="spinner" style="margin:3rem auto"></div>';
+  paintProgress(0);
   try {
     const it = await api(`/api/entries/${id}`);
-    if (looksUnretrieved(it.content)) {
+    if (looksUnretrieved(it)) {
       // Wallabag has no readable copy — bounce straight to the source.
+      // Clear last-open first so a later visit doesn't resume into the bounce.
+      fetch("/api/state/last", { method: "DELETE" }).catch(() => {});
       closeReader();
       window.location.href = it.url;
       return;
@@ -415,7 +469,20 @@ async function openReader(id) {
     $("#openOriginal").href = it.url;
     $("#artContent").innerHTML = sanitize(it.content) || `<p class="muted">No stored content. <a href="${esc(it.url)}" target="_blank" rel="noopener">Read the original ↗</a></p>`;
     syncReaderButtons();
+    // Scroll memory: drop back to the stored position; fresh reads and
+    // finished articles start from the top.
+    const saved = Number(it.progress) || 0;
     readerEl.scrollTop = 0;
+    // Register as the last-open article even if the user never scrolls
+    // (the server keeps the furthest position, so sending 0 is safe).
+    reportProgress({ force: true });
+    progressSent = saved;
+    if (saved > 0 && saved < PROGRESS_DONE) {
+      requestAnimationFrame(() => {
+        readerEl.scrollTop = saved * (readerEl.scrollHeight - readerEl.clientHeight);
+        paintProgress();
+      });
+    }
     armFinishDetection();
   } catch (err) {
     $("#artContent").innerHTML = `<p class="muted">Couldn't load this entry: ${esc(err.message)}</p>`;
@@ -424,6 +491,12 @@ async function openReader(id) {
 
 function closeReader() {
   disarmFinishDetection();
+  // Flush the final position, then clear last-open: a deliberate close means
+  // the next plain visit should show the list, not resume this article.
+  reportProgress();
+  clearTimeout(progressTimer);
+  progressTimer = null;
+  if (state.current) fetch("/api/state/last", { method: "DELETE" }).catch(() => {});
   $("#reader").hidden = true;
   $("#typoPanel").hidden = true;
   document.body.style.overflow = "";
@@ -512,6 +585,21 @@ function route() {
   }
 }
 
+/* On a plain visit (no hash at all), resume the article that was last open
+   at its stored position; anything explicit — #/starred, #/read/…, the /add
+   share target — is honored as requested. Finished articles don't resume. */
+async function resumeOrRoute() {
+  if (!location.hash) {
+    try {
+      const st = await api("/api/state");
+      if (st.last && st.last.progress < PROGRESS_DONE) {
+        history.replaceState(null, "", `#/read/${st.last.id}`);
+      }
+    } catch { /* resume is a nicety; fall through to the normal route */ }
+  }
+  route();
+}
+
 /* ---------- Setup ---------- */
 
 function bindEvents() {
@@ -585,6 +673,13 @@ function bindEvents() {
       $("#typoPanel").hidden = true;
     }
   });
+  $("#reader").addEventListener("scroll", onReaderScroll, { passive: true });
+  // Flush the reading position when the tab is backgrounded or closed —
+  // that's the position another visit (or device) resumes from.
+  addEventListener("pagehide", () => reportProgress({ beacon: true }));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") reportProgress({ beacon: true });
+  });
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
@@ -613,7 +708,7 @@ bindPrefControls();
 bindEvents();
 initSetupHelpers();
 handleShareTarget();
-route();
+resumeOrRoute();
 refreshCounts();
 loadTags();
 

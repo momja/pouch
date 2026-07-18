@@ -11,8 +11,9 @@ import (
 
 // Server wires Pouch's HTTP API and the embedded frontend together.
 type Server struct {
-	cfg    Config
-	static fs.FS
+	cfg      Config
+	static   fs.FS
+	progress *progressStore
 }
 
 // New configures the wallabago client and returns a ready-to-run http.Server.
@@ -29,7 +30,7 @@ func New(cfg Config) *http.Server {
 	if err != nil {
 		panic(err)
 	}
-	s := &Server{cfg: cfg, static: staticFS}
+	s := &Server{cfg: cfg, static: staticFS, progress: newProgressStore(cfg.DataDir)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -38,6 +39,10 @@ func New(cfg Config) *http.Server {
 	mux.HandleFunc("GET /api/entries/{id}", s.handleGetEntry)
 	mux.HandleFunc("PATCH /api/entries/{id}", s.handlePatchEntry)
 	mux.HandleFunc("DELETE /api/entries/{id}", s.handleDeleteEntry)
+	// POST (not PUT) so navigator.sendBeacon can report on page unload.
+	mux.HandleFunc("POST /api/entries/{id}/progress", s.handleSetProgress)
+	mux.HandleFunc("GET /api/state", s.handleState)
+	mux.HandleFunc("DELETE /api/state/last", s.handleClearLast)
 	mux.HandleFunc("GET /api/tags", s.handleTags)
 	mux.HandleFunc("GET /api/quick-add", s.handleQuickAdd)
 	mux.HandleFunc("/", s.handleStatic)

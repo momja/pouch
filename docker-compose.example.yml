@@ -11,6 +11,8 @@ services:
       - WALLABAG_CLIENT_SECRET=${WALLABAG_CLIENT_SECRET}
       - WALLABAG_USERNAME=${WALLABAG_USERNAME}
       - WALLABAG_PASSWORD=${WALLABAG_PASSWORD}
+    volumes:
+      - pouch_data:/data   # scroll memory (reading positions)
     labels:
       - traefik.enable=true
       - traefik.http.routers.pouch.rule=Host(`pouch.example.com`)
@@ -23,3 +25,6 @@ services:
 networks:
   proxy:
     external: true
+
+volumes:
+  pouch_data:
