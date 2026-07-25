@@ -17,6 +17,7 @@ internal/server/
   server.go                Routes, static file serving with SPA fallback
   api.go                   REST handlers, wallabago glue, quick-add HTML page
   progress.go              Scroll-memory store (JSON file under POUCH_DATA_DIR)
+  notes.go                 Inline-note store (JSON file under POUCH_DATA_DIR)
 web/
   embed.go                 //go:embed all:static → web.Static
   static/
@@ -62,6 +63,10 @@ docker-compose.example.yml Traefik-labelled reference deployment
 | `GET /api/tags` | All tags |
 | `GET /api/quick-add?url=&tags=` | Save + human-friendly HTML confirmation (share sheet / bookmarklet target) |
 | `POST /api/entries/{id}/progress` `{progress: 0..1}` | Record reading position (POST, not PUT, so `sendBeacon` works) |
+| `GET /api/entries/{id}/notes` | Inline notes on an entry (also inlined into `GET /api/entries/{id}`) |
+| `POST /api/entries/{id}/notes` `{start, end, quote, body}` | Add a note, returns it with its id |
+| `PATCH /api/entries/{id}/notes/{noteID}` `{body}` | Reword a note |
+| `DELETE /api/entries/{id}/notes/{noteID}` | Remove a note |
 | `GET /api/state` | `{last: {id, progress} \| null}` — the last-open article, for resume-on-visit |
 | `DELETE /api/state/last` | Reader closed deliberately; forget the last-open article |
 | `GET /healthz` | Liveness |
@@ -78,6 +83,17 @@ positions in memory only. Conflict rule per project owner: **furthest wins** —
 merges the stored position into the entry JSON as `progress`. Deleting an
 entry drops its position; nothing is ever pruned otherwise (the file stays
 tiny — one number per article ever opened).
+
+### Inline notes (`internal/server/notes.go`)
+
+Same shape as the progress store — an in-memory map (entry id → notes) written
+atomically to `$POUCH_DATA_DIR/notes.json` on every change, ids from a single
+counter. A note is `{start, end, quote, body}`: character offsets into the
+article's text *as the reader renders it*, plus the quoted text so the client
+can re-find the passage when the offsets drift (wallabag re-fetches shift
+content). `GET /api/entries/{id}` inlines the full list; list/patch responses
+carry a `noteCount` so cards can show a note badge. Deleting an entry drops
+its notes.
 
 There is intentionally **no auth** (per project owner's request); access control is
 the deployment's job (private network / reverse proxy).
@@ -139,7 +155,22 @@ No frameworks, no build step. `app.js` is an ES module with:
   with **no hash at all** asks `/api/state` and rewrites the URL to
   `#/read/{id}` when there's an unfinished last-open article; explicit hashes
   and the `/add` share target are never hijacked.
-- Keyboard: `a` opens save dialog, `/` focuses filter, `Esc` closes things.
+- **Inline notes** (the `renderNotes`/`renderCards` block in `app.js`):
+  selecting text in the reader floats a "Note" button over the selection
+  (`selectionchange`, debounced; the button acts on `pointerdown` because a
+  touch tap would collapse the selection before a click lands). Offsets come
+  from cloning the range and the range before it and measuring their text,
+  with `.note-card` subtrees stripped so the notes never shift the coordinate
+  system they're anchored to. Rendering repaints `#artContent` from the
+  pristine sanitized HTML (`artHTML`), wraps every note's range in
+  `<mark class="note-mark">` by splitting text nodes at the range boundaries,
+  then inserts each note's card after the top-level block its *last* mark sits
+  in (so a passage spanning several blocks isn't interrupted by its own note).
+  Notes whose quote is nowhere to be found still render, appended at the end,
+  rather than vanishing. Editing a note re-places only the cards
+  (`renderCards`) so the scroll position doesn't move.
+- Keyboard: `a` opens save dialog, `/` focuses filter, `Esc` closes things
+  (a note composer first, then the reader), `Cmd/Ctrl+Enter` saves a note.
 
 ## Mock Wallabag
 

@@ -32,6 +32,9 @@ no frontend frameworks, no build step.
   two browsers disagree, the furthest position wins.
 - **Reading progress** — a single quiet hairline along the bottom edge fills
   left-to-right as you read.
+- **Inline notes** — highlight a passage, write what you think, and the remark
+  waits in the margin next time you open the article. Stored server-side, so
+  the notes follow you between devices.
 - **Broken-article bounce** — when Wallabag stored only its "can't retrieve
   contents" placeholder — or a bot wall it mistook for the page ("Access
   Denied", Cloudflare's "Just a moment…") — opening the entry redirects

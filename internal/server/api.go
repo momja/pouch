@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Strubbl/wallabago/v9"
@@ -39,6 +40,8 @@ type entry struct {
 	Tags        []string `json:"tags"`
 	Content     string   `json:"content,omitempty"`
 	Progress    float64  `json:"progress,omitempty"` // scroll memory, 0..1
+	NoteCount   int      `json:"noteCount"`          // inline comments on this entry
+	Notes       []note   `json:"notes,omitempty"`    // full entry only
 }
 
 func fromItem(it wallabago.Item, withContent bool) entry {
@@ -115,7 +118,9 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]entry, 0, len(res.Embedded.Items))
 	for _, it := range res.Embedded.Items {
-		items = append(items, fromItem(it, false))
+		e := fromItem(it, false)
+		e.NoteCount = s.notes.Count(it.ID)
+		items = append(items, e)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"page":  res.Page,
@@ -177,6 +182,8 @@ func (s *Server) handleGetEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	e := fromItem(it, true)
 	e.Progress = s.progress.Get(id)
+	e.Notes = s.notes.List(id)
+	e.NoteCount = len(e.Notes)
 	writeJSON(w, http.StatusOK, e)
 }
 
@@ -225,7 +232,9 @@ func (s *Server) handlePatchEntry(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadGateway, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, fromItem(it, false))
+	e := fromItem(it, false)
+	e.NoteCount = s.notes.Count(id)
+	writeJSON(w, http.StatusOK, e)
 }
 
 // DELETE /api/entries/{id}
@@ -240,6 +249,92 @@ func (s *Server) handleDeleteEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.progress.Forget(id)
+	s.notes.Forget(id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+/* ---------- Inline notes ---------- */
+
+func noteID(r *http.Request) (int, error) {
+	return strconv.Atoi(r.PathValue("noteID"))
+}
+
+// GET /api/entries/{id}/notes
+func (s *Server) handleListNotes(w http.ResponseWriter, r *http.Request) {
+	id, err := entryID(r)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.notes.List(id))
+}
+
+// POST /api/entries/{id}/notes {"start":12,"end":48,"quote":"…","body":"…"}
+// Offsets are character positions into the article text as the reader renders
+// it; the quote lets the client re-find the span if they ever drift.
+func (s *Server) handleCreateNote(w http.ResponseWriter, r *http.Request) {
+	id, err := entryID(r)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		Start int    `json:"start"`
+		End   int    `json:"end"`
+		Quote string `json:"quote"`
+		Body  string `json:"body"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.End <= req.Start || strings.TrimSpace(req.Body) == "" {
+		apiError(w, http.StatusBadRequest, fmt.Errorf("a note needs a non-empty range and body"))
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.notes.Add(id, note{
+		Start: req.Start,
+		End:   req.End,
+		Quote: req.Quote,
+		Body:  strings.TrimSpace(req.Body),
+	}))
+}
+
+// PATCH /api/entries/{id}/notes/{noteID} {"body": "…"}
+func (s *Server) handleUpdateNote(w http.ResponseWriter, r *http.Request) {
+	id, err := entryID(r)
+	nid, nerr := noteID(r)
+	if err != nil || nerr != nil {
+		apiError(w, http.StatusBadRequest, fmt.Errorf("bad entry or note id"))
+		return
+	}
+	var req struct {
+		Body string `json:"body"`
+	}
+	if err := readJSON(r, &req); err != nil || strings.TrimSpace(req.Body) == "" {
+		apiError(w, http.StatusBadRequest, fmt.Errorf("body must be {\"body\": \"…\"}"))
+		return
+	}
+	n, ok := s.notes.Update(id, nid, strings.TrimSpace(req.Body))
+	if !ok {
+		apiError(w, http.StatusNotFound, fmt.Errorf("no such note"))
+		return
+	}
+	writeJSON(w, http.StatusOK, n)
+}
+
+// DELETE /api/entries/{id}/notes/{noteID}
+func (s *Server) handleDeleteNote(w http.ResponseWriter, r *http.Request) {
+	id, err := entryID(r)
+	nid, nerr := noteID(r)
+	if err != nil || nerr != nil {
+		apiError(w, http.StatusBadRequest, fmt.Errorf("bad entry or note id"))
+		return
+	}
+	if !s.notes.Delete(id, nid) {
+		apiError(w, http.StatusNotFound, fmt.Errorf("no such note"))
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

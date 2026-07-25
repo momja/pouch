@@ -25,8 +25,12 @@ WALLABAG_USERNAME=mock WALLABAG_PASSWORD=mock go run ./cmd/pouch
   `/api/quick-add?url=…` page. Watch the console for errors; there should be
   none. Beware same-URL/hash-only navigations: they don't reload the page, so
   the tab keeps running the previously served app.js.
-- Local runs create `./data/progress.json` (scroll memory; gitignored) —
-  override with `POUCH_DATA_DIR`.
+- Local runs create `./data/progress.json` (scroll memory) and
+  `./data/notes.json` (inline notes) — both gitignored; override the location
+  with `POUCH_DATA_DIR`.
+- Notes are driven by text selection, which is awkward to click through by
+  hand: build the selection with a `Range` + `getSelection().addRange(…)` in
+  the console, then dispatch `pointerdown` on `#noteAddBtn`.
 
 ## Conventions
 

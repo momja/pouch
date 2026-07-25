@@ -53,18 +53,7 @@ func newProgressStore(dataDir string) *progressStore {
 
 // save persists the store; call with the lock held.
 func (s *progressStore) save() {
-	if s.path == "" {
-		return
-	}
-	raw, _ := json.Marshal(s.data)
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err == nil {
-		if err := os.Rename(tmp, s.path); err != nil {
-			log.Printf("progress: save failed: %v", err)
-		}
-	} else {
-		log.Printf("progress: save failed: %v", err)
-	}
+	writeJSONFile(s.path, s.data, "progress")
 }
 
 // Set records a position for an entry and marks it as the last-open article.

@@ -3,7 +3,7 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const PER_PAGE = 30;
 
 const FILTERS = {
@@ -164,6 +164,7 @@ function cardHTML(it) {
     it.domain && `<span>${esc(it.domain)}</span>`,
     it.readingTime > 0 && `<span class="dot"></span><span>${it.readingTime} min</span>`,
     it.createdAt && `<span class="dot"></span><span>${timeAgo(it.createdAt)}</span>`,
+    it.noteCount > 0 && `<span class="dot"></span><span class="has-notes"><svg class="icon"><use href="#i-note"/></svg>${it.noteCount}</span>`,
   ].filter(Boolean).join("");
   const tags = it.tags.length
     ? `<div class="card-tags">${it.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join("")}</div>` : "";
@@ -370,7 +371,7 @@ function reportProgress({ beacon = false, force = false } = {}) {
 
 function onReaderScroll() {
   if (!progressRAF) {
-    progressRAF = requestAnimationFrame(() => { progressRAF = 0; paintProgress(); });
+    progressRAF = requestAnimationFrame(() => { progressRAF = 0; paintProgress(); positionNoteButton(); });
   }
   if (!progressTimer) {
     progressTimer = setTimeout(() => { progressTimer = null; reportProgress(); }, 2500);
@@ -467,7 +468,11 @@ async function openReader(id) {
     $("#artMeta").innerHTML = bits.join("");
     $("#artTags").innerHTML = it.tags.map((t) => `<span class="chip" style="pointer-events:none">${esc(t)}</span>`).join("");
     $("#openOriginal").href = it.url;
-    $("#artContent").innerHTML = sanitize(it.content) || `<p class="muted">No stored content. <a href="${esc(it.url)}" target="_blank" rel="noopener">Read the original ↗</a></p>`;
+    artHTML = sanitize(it.content) || `<p class="muted">No stored content. <a href="${esc(it.url)}" target="_blank" rel="noopener">Read the original ↗</a></p>`;
+    notes = it.notes || [];
+    pendingNote = null;
+    editingNote = 0;
+    renderNotes();
     syncReaderButtons();
     // Scroll memory: drop back to the stored position; fresh reads and
     // finished articles start from the top.
@@ -499,11 +504,323 @@ function closeReader() {
   if (state.current) fetch("/api/state/last", { method: "DELETE" }).catch(() => {});
   $("#reader").hidden = true;
   $("#typoPanel").hidden = true;
+  $("#noteAddBtn").hidden = true;
   document.body.style.overflow = "";
+  notes = [];
+  pendingNote = null;
+  editingNote = 0;
+  selRange = null;
   state.current = null;
   if (location.hash.startsWith("#/read/")) {
     history.replaceState(null, "", `#/${state.filter}`);
   }
+}
+
+/* ---------- Inline notes ---------- */
+
+/* Highlight a passage, say something about it, and the remark is waiting in
+   the margin next time you open the article.
+
+   A note anchors to character offsets into the article's text — the text
+   nodes of #artContent concatenated, with note cards skipped so the notes
+   themselves never shift the coordinate system. The quote is stored too and
+   wins when the offsets no longer match (wallabag re-fetches change content).
+
+   Rendering repaints from the pristine sanitized HTML: wrap every note's
+   range in a <mark>, then drop each note's card after the block it lives in.
+   Card-only changes (editing) skip the repaint so scroll stays put. */
+
+let artHTML = "";       // sanitized article HTML, before marks and cards
+let notes = [];         // notes on the open entry
+let pendingNote = null; // {start, end, quote} being composed
+let editingNote = 0;    // id of the note open for editing
+let selRange = null;    // {start, end, quote, range} under the "Note" button
+let selTimer = null;
+
+function clipQuote(s) {
+  const t = (s || "").replace(/\s+/g, " ").trim();
+  return t.length > 180 ? `${t.slice(0, 180)}…` : t;
+}
+
+/* Text nodes of the article with their global offsets; note cards excluded. */
+function textPieces(root) {
+  const pieces = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement?.closest(".note-card") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  let off = 0, n;
+  while ((n = walker.nextNode())) {
+    pieces.push({ node: n, start: off });
+    off += n.nodeValue.length;
+  }
+  return pieces;
+}
+
+/* Text of a cloned range, minus any note cards caught inside it. */
+function plainText(frag) {
+  frag.querySelectorAll(".note-card").forEach((n) => n.remove());
+  return frag.textContent;
+}
+
+/* Where a note sits today: its stored offsets if the quote still matches
+   there, else wherever the quote turns up. null = the passage is gone. */
+function locateNote(n, text) {
+  if (!n.quote || text.slice(n.start, n.end) === n.quote) return { start: n.start, end: n.end };
+  const i = text.indexOf(n.quote);
+  return i >= 0 ? { start: i, end: i + n.quote.length } : null;
+}
+
+/* Wrap each range in <mark>: split every text node at the range boundaries it
+   contains, then wrap the fragments that land inside a range. */
+function markRanges(pieces, ranges) {
+  if (!ranges.length) return;
+  const bounds = [...new Set(ranges.flatMap((r) => [r.start, r.end]))].sort((a, b) => a - b);
+  for (const piece of pieces) {
+    let node = piece.node;
+    let start = piece.start;
+    const frags = [];
+    for (const b of bounds) {
+      const local = b - start;
+      if (local <= 0 || local >= node.nodeValue.length) continue;
+      const tail = node.splitText(local);
+      frags.push({ node, start });
+      node = tail;
+      start = b;
+    }
+    frags.push({ node, start });
+    for (const f of frags) {
+      const mid = f.start + f.node.nodeValue.length / 2;
+      const covering = ranges.filter((r) => r.start <= mid && mid < r.end);
+      if (!covering.length) continue;
+      const owner = covering[covering.length - 1]; // a pending note is pushed last
+      const mark = document.createElement("mark");
+      mark.className = owner.id === 0 ? "note-mark pending" : "note-mark";
+      mark.dataset.note = String(owner.id);
+      f.node.parentNode.insertBefore(mark, f.node);
+      mark.appendChild(f.node);
+    }
+  }
+}
+
+/* The top-level block a note's highlight ends in — the card goes after it,
+   so a passage spanning several blocks is never interrupted by its own note. */
+function anchorOf(art, id) {
+  const marks = art.querySelectorAll(`.note-mark[data-note="${id}"]`);
+  let el = marks[marks.length - 1];
+  if (!el) return null;
+  while (el.parentElement && el.parentElement !== art) el = el.parentElement;
+  return el.parentElement === art ? el : null;
+}
+
+function placeCard(art, block, card) {
+  if (!block) { art.append(card); return; } // passage gone: keep the note visible
+  let at = block;
+  while (at.nextElementSibling?.classList.contains("note-card")) at = at.nextElementSibling;
+  at.after(card);
+}
+
+function noteCard(n) {
+  const card = document.createElement("aside");
+  card.className = "note-card";
+  card.dataset.note = String(n.id);
+  const quote = `<div class="note-quote">${esc(clipQuote(n.quote))}</div>`;
+  card.innerHTML = editingNote === n.id
+    ? `${quote}
+       <textarea class="note-input">${esc(n.body)}</textarea>
+       <div class="note-actions">
+         <button data-note-act="cancel-edit">Cancel</button>
+         <button class="strong" data-note-act="save-edit">Save</button>
+       </div>`
+    : `${quote}
+       <div class="note-body">${esc(n.body)}</div>
+       <div class="note-actions">
+         <button data-note-act="edit">Edit</button>
+         <button data-note-act="delete">Delete</button>
+       </div>`;
+  return card;
+}
+
+function composerCard() {
+  const card = document.createElement("aside");
+  card.className = "note-card composing";
+  card.innerHTML = `<div class="note-quote">${esc(clipQuote(pendingNote.quote))}</div>
+    <textarea class="note-input" placeholder="What do you make of this?"></textarea>
+    <div class="note-actions">
+      <button data-note-act="cancel-new">Cancel</button>
+      <button class="strong" data-note-act="save-new">Add note</button>
+    </div>`;
+  return card;
+}
+
+/* Re-place the cards against the marks already in the article. */
+function renderCards() {
+  const art = $("#artContent");
+  art.querySelectorAll(".note-card").forEach((c) => c.remove());
+  for (const n of [...notes].sort((a, b) => a.start - b.start)) {
+    placeCard(art, anchorOf(art, n.id), noteCard(n));
+  }
+  if (pendingNote) {
+    const card = composerCard();
+    placeCard(art, anchorOf(art, 0), card);
+    card.querySelector("textarea").focus();
+  }
+}
+
+/* Full repaint: highlights change (note added, deleted, composer opened). */
+function renderNotes() {
+  const art = $("#artContent");
+  const reader = $("#reader");
+  const keep = reader.scrollTop;
+  art.innerHTML = artHTML;
+  const pieces = textPieces(art);
+  const text = pieces.map((p) => p.node.nodeValue).join("");
+  const ranges = [];
+  for (const n of notes) {
+    const at = locateNote(n, text);
+    if (at) ranges.push({ ...at, id: n.id });
+  }
+  if (pendingNote) ranges.push({ start: pendingNote.start, end: pendingNote.end, id: 0 });
+  markRanges(pieces, ranges);
+  renderCards();
+  reader.scrollTop = keep;
+}
+
+function syncNoteCount() {
+  if (state.current) state.current.noteCount = notes.length;
+  const it = state.items.find((x) => x.id === state.current?.id);
+  if (it) { it.noteCount = notes.length; renderList(); }
+}
+
+async function saveNote(body) {
+  if (!pendingNote || !state.current || !body.trim()) return;
+  const { start, end, quote } = pendingNote;
+  try {
+    const created = await api(`/api/entries/${state.current.id}/notes`, {
+      method: "POST",
+      body: JSON.stringify({ start, end, quote, body: body.trim() }),
+    });
+    notes.push(created);
+    pendingNote = null;
+    renderNotes();
+    syncNoteCount();
+  } catch (err) { toast(`Couldn't save the note: ${err.message}`); }
+}
+
+async function updateNote(id, body) {
+  if (!state.current || !body.trim()) return;
+  try {
+    const saved = await api(`/api/entries/${state.current.id}/notes/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ body: body.trim() }),
+    });
+    notes = notes.map((n) => (n.id === id ? saved : n));
+    editingNote = 0;
+    renderCards();
+  } catch (err) { toast(`Couldn't save the note: ${err.message}`); }
+}
+
+async function deleteNote(id) {
+  if (!state.current) return;
+  try {
+    await api(`/api/entries/${state.current.id}/notes/${id}`, { method: "DELETE" });
+    notes = notes.filter((n) => n.id !== id);
+    renderNotes();
+    syncNoteCount();
+  } catch (err) { toast(`Couldn't delete the note: ${err.message}`); }
+}
+
+/* Two-step delete, same idea as entries: tap once to arm, again to confirm. */
+function armNoteDelete(id, btn) {
+  if (btn.dataset.armed) { deleteNote(id); return; }
+  btn.dataset.armed = "1";
+  btn.textContent = "Really?";
+  btn.classList.add("danger");
+  setTimeout(() => {
+    if (!btn.isConnected) return;
+    delete btn.dataset.armed;
+    btn.textContent = "Delete";
+    btn.classList.remove("danger");
+  }, 3000);
+}
+
+function focusNote(id) {
+  const card = $(`#artContent .note-card[data-note="${id}"]`);
+  if (!card) return;
+  card.scrollIntoView({ block: "center", behavior: "smooth" });
+  card.classList.remove("flash");
+  void card.offsetWidth; // restart the animation
+  card.classList.add("flash");
+}
+
+function onNoteClick(e) {
+  const act = e.target.closest("[data-note-act]");
+  if (act) {
+    const card = act.closest(".note-card");
+    const id = Number(card.dataset.note || 0);
+    const body = () => card.querySelector("textarea").value;
+    switch (act.dataset.noteAct) {
+      case "save-new": saveNote(body()); break;
+      case "cancel-new": pendingNote = null; renderNotes(); break;
+      case "edit": editingNote = id; renderCards(); break;
+      case "cancel-edit": editingNote = 0; renderCards(); break;
+      case "save-edit": updateNote(id, body()); break;
+      case "delete": armNoteDelete(id, act); break;
+    }
+    return;
+  }
+  const mark = e.target.closest(".note-mark[data-note]");
+  if (mark) focusNote(Number(mark.dataset.note));
+}
+
+/* Selecting a passage floats a "Note" button over it. */
+function positionNoteButton() {
+  const btn = $("#noteAddBtn");
+  if (btn.hidden || !selRange) return;
+  const rect = selRange.range.getBoundingClientRect();
+  const w = btn.offsetWidth;
+  const h = btn.offsetHeight;
+  btn.style.left = `${Math.min(innerWidth - w - 8, Math.max(8, rect.left + rect.width / 2 - w / 2))}px`;
+  const above = rect.top - h - 10;
+  btn.style.top = `${above > 8 ? above : Math.min(innerHeight - h - 8, rect.bottom + 10)}px`;
+}
+
+function updateNoteButton() {
+  const btn = $("#noteAddBtn");
+  const art = $("#artContent");
+  const sel = getSelection();
+  const inArticle = (n) =>
+    art.contains(n) && !(n.nodeType === 1 ? n : n.parentElement)?.closest(".note-card");
+  if ($("#reader").hidden || pendingNote || !sel?.rangeCount || sel.isCollapsed) { btn.hidden = true; return; }
+  const range = sel.getRangeAt(0);
+  if (!inArticle(range.startContainer) || !inArticle(range.endContainer)) { btn.hidden = true; return; }
+  const quote = plainText(range.cloneContents());
+  if (!quote.trim()) { btn.hidden = true; return; }
+  const pre = document.createRange();
+  pre.selectNodeContents(art);
+  pre.setEnd(range.startContainer, range.startOffset);
+  const start = plainText(pre.cloneContents()).length;
+  selRange = { start, end: start + quote.length, quote, range };
+  btn.hidden = false;
+  positionNoteButton();
+}
+
+function startNote() {
+  if (!selRange) return;
+  const { start, end, quote } = selRange;
+  pendingNote = { start, end, quote };
+  selRange = null;
+  $("#noteAddBtn").hidden = true;
+  getSelection()?.removeAllRanges();
+  renderNotes();
+}
+
+function cancelNoteEditing() {
+  if (!pendingNote && !editingNote) return false;
+  const wasComposing = !!pendingNote;
+  pendingNote = null;
+  editingNote = 0;
+  if (wasComposing) renderNotes(); else renderCards();
+  return true;
 }
 
 /* ---------- Add flow ---------- */
@@ -674,6 +991,21 @@ function bindEvents() {
     }
   });
   $("#reader").addEventListener("scroll", onReaderScroll, { passive: true });
+
+  // Inline notes: selection → floating button → composer card in the flow.
+  document.addEventListener("selectionchange", () => {
+    clearTimeout(selTimer);
+    selTimer = setTimeout(updateNoteButton, 150);
+  });
+  // pointerdown, not click: on touch the tap would collapse the selection
+  // (and hide the button) before a click ever lands.
+  $("#noteAddBtn").addEventListener("pointerdown", (e) => { e.preventDefault(); startNote(); });
+  $("#artContent").addEventListener("click", onNoteClick);
+  $("#artContent").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.target.closest(".note-card")?.querySelector("[data-note-act^='save']")?.click();
+    }
+  });
   // Flush the reading position when the tab is backgrounded or closed —
   // that's the position another visit (or device) resumes from.
   addEventListener("pagehide", () => reportProgress({ beacon: true }));
@@ -684,6 +1016,7 @@ function bindEvents() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       if (!$("#typoPanel").hidden) { $("#typoPanel").hidden = true; return; }
+      if (cancelNoteEditing()) return;
       if (!$("#reader").hidden) closeReader();
       return;
     }
