@@ -3,6 +3,8 @@
 A cozy, self-hosted web client for [Wallabag](https://wallabag.org) — a wallaby keeps
 things in its pouch to carry around; so do you.
 
+<img width="1155" height="743" alt="image" src="https://github.com/user-attachments/assets/2edd3d6f-45cf-441c-8cd7-51e3d68285dc" />
+
 Pouch is a single Go binary (built on the unofficial Go API wrapper
 [Strubbl/wallabago](https://github.com/Strubbl/wallabago)) that serves a fast,
 installable PWA with a warm, editorial reading experience. No Material design,
