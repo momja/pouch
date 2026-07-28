@@ -29,7 +29,7 @@ const state = {
 /* ---------- Preferences ---------- */
 
 const PREF_KEY = "pouch:prefs";
-const defaultPrefs = { theme: "paper", font: "serif", size: 18, lh: 17, measure: 42, autoArchive: true };
+const defaultPrefs = { theme: "auto", font: "serif", size: 18, lh: 17, measure: 42, autoArchive: true };
 let prefs = { ...defaultPrefs };
 try {
   prefs = { ...defaultPrefs, ...JSON.parse(localStorage.getItem(PREF_KEY) || "{}") };
@@ -39,9 +39,17 @@ function savePrefs() {
   localStorage.setItem(PREF_KEY, JSON.stringify(prefs));
 }
 
+const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+systemDark.addEventListener("change", () => { if (prefs.theme === "auto") applyPrefs(); });
+
+function resolvedTheme() {
+  if (prefs.theme !== "auto") return prefs.theme;
+  return systemDark.matches ? "ink" : "paper";
+}
+
 function applyPrefs() {
   const root = document.documentElement;
-  root.dataset.theme = prefs.theme;
+  root.dataset.theme = resolvedTheme();
   root.style.setProperty("--reader-font", `var(--font-${prefs.font})`);
   root.style.setProperty("--reader-size", `${prefs.size}px`);
   root.style.setProperty("--reader-lh", (prefs.lh / 10).toFixed(1));

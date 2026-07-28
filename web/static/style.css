@@ -75,6 +75,22 @@
   color-scheme: dark;
 }
 
+/* Before app.js resolves the theme (it always sets data-theme), dark-system
+   users get ink instead of a flash of paper. Mirror of the ink block above. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #131313;
+    --raised: #1c1d1f;
+    --text: #e7e4de;
+    --muted: #8e8b84;
+    --line: #2b2c2f;
+    --accent: #de9468;
+    --accent-contrast: #131313;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 28px -18px rgba(0, 0, 0, 0.8);
+    color-scheme: dark;
+  }
+}
+
 /* ---------- Base ---------- */
 
 * { box-sizing: border-box; }
@@ -593,6 +609,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); padding: 0; back
   font-size: 0.95rem;
 }
 .swatch.active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+.swatch[data-theme-pick="auto"]  { background: linear-gradient(135deg, #f6f3ec 50%, #131313 50%); color: #8a8578; }
 .swatch[data-theme-pick="paper"] { background: #f6f3ec; color: #201d18; }
 .swatch[data-theme-pick="sepia"] { background: #f1e8d5; color: #2c2416; }
 .swatch[data-theme-pick="mist"]  { background: #eef1f4; color: #1c2127; }
