@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -12,19 +13,6 @@ import (
 
 	"github.com/Strubbl/wallabago/v9"
 )
-
-// apiCall wraps wallabago.APICall, which returns (nil, nil) when wallabag
-// answers with a non-200 status; normalize that into a real error.
-func apiCall(apiURL, method string, postData []byte) ([]byte, error) {
-	body, err := wallabago.APICall(apiURL, method, postData)
-	if err != nil {
-		return nil, err
-	}
-	if body == nil {
-		return nil, fmt.Errorf("wallabag returned a non-OK status for %s %s", method, apiURL)
-	}
-	return body, nil
-}
 
 // entry is the trimmed shape Pouch's frontend consumes.
 type entry struct {
@@ -110,8 +98,19 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	if perPage < 1 || perPage > 100 {
 		perPage = 30
 	}
-	res, err := wallabago.GetEntries(wallabago.APICall, archive, starred,
-		"created", "desc", page, perPage, q.Get("tag"), -1, -1, "metadata", "")
+	params := url.Values{"sort": {"created"}, "order": {"desc"}, "page": {strconv.Itoa(page)},
+		"perPage": {strconv.Itoa(perPage)}, "detail": {"metadata"}}
+	if archive >= 0 {
+		params.Set("archive", strconv.Itoa(archive))
+	}
+	if starred >= 0 {
+		params.Set("starred", strconv.Itoa(starred))
+	}
+	if tag := q.Get("tag"); tag != "" {
+		params.Set("tags", tag)
+	}
+	var res wallabago.Entries
+	err := s.wallabag.getJSON(r.Context(), "/api/entries.json?"+params.Encode(), &res)
 	if err != nil {
 		apiError(w, http.StatusBadGateway, err)
 		return
@@ -131,14 +130,14 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 }
 
 // createEntry POSTs a new URL to wallabag and returns the created item.
-func createEntry(rawURL, tags string) (wallabago.Item, error) {
+func (s *Server) createEntry(ctx context.Context, rawURL, tags string) (wallabago.Item, error) {
 	var it wallabago.Item
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return it, fmt.Errorf("not a valid http(s) URL: %q", rawURL)
 	}
 	payload, _ := json.Marshal(map[string]string{"url": rawURL, "tags": tags})
-	body, err := apiCall(wallabago.LibConfig.WallabagURL+"/api/entries.json", "POST", payload)
+	body, err := s.wallabag.apiCall(ctx, "/api/entries.json", "POST", payload)
 	if err != nil {
 		return it, err
 	}
@@ -156,7 +155,7 @@ func (s *Server) handleCreateEntry(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, err)
 		return
 	}
-	it, err := createEntry(req.URL, req.Tags)
+	it, err := s.createEntry(r.Context(), req.URL, req.Tags)
 	if err != nil {
 		apiError(w, http.StatusBadGateway, err)
 		return
@@ -175,7 +174,8 @@ func (s *Server) handleGetEntry(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, err)
 		return
 	}
-	it, err := wallabago.GetEntry(wallabago.APICall, id)
+	var it wallabago.Item
+	err = s.wallabag.getJSON(r.Context(), "/api/entries/"+strconv.Itoa(id)+".json", &it)
 	if err != nil {
 		apiError(w, http.StatusBadGateway, err)
 		return
@@ -222,7 +222,7 @@ func (s *Server) handlePatchEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, _ := json.Marshal(patch)
-	body, err := apiCall(wallabago.LibConfig.WallabagURL+"/api/entries/"+strconv.Itoa(id)+".json", "PATCH", payload)
+	body, err := s.wallabag.apiCall(r.Context(), "/api/entries/"+strconv.Itoa(id)+".json", "PATCH", payload)
 	if err != nil {
 		apiError(w, http.StatusBadGateway, err)
 		return
@@ -244,7 +244,7 @@ func (s *Server) handleDeleteEntry(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, err)
 		return
 	}
-	if _, err := apiCall(wallabago.LibConfig.WallabagURL+"/api/entries/"+strconv.Itoa(id)+".json", "DELETE", nil); err != nil {
+	if _, err := s.wallabag.apiCall(r.Context(), "/api/entries/"+strconv.Itoa(id)+".json", "DELETE", nil); err != nil {
 		apiError(w, http.StatusBadGateway, err)
 		return
 	}
@@ -378,7 +378,8 @@ func (s *Server) handleClearLast(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/tags
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
-	tags, err := wallabago.GetTags(wallabago.APICall)
+	var tags []wallabago.Tag
+	err := s.wallabag.getJSON(r.Context(), "/api/tags", &tags)
 	if err != nil {
 		apiError(w, http.StatusBadGateway, err)
 		return
@@ -397,7 +398,7 @@ func (s *Server) handleQuickAdd(w http.ResponseWriter, r *http.Request) {
 		quickAddPage(w, http.StatusBadRequest, "Nothing to save", "No url parameter was given.", "")
 		return
 	}
-	it, err := createEntry(rawURL, r.URL.Query().Get("tags"))
+	it, err := s.createEntry(r.Context(), rawURL, r.URL.Query().Get("tags"))
 	if err != nil {
 		quickAddPage(w, http.StatusBadGateway, "Could not save", err.Error(), "")
 		return

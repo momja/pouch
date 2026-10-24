@@ -5,34 +5,27 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Strubbl/wallabago/v9"
 	"github.com/momja/pouch/web"
 )
 
 // Server wires Pouch's HTTP API and the embedded frontend together.
 type Server struct {
 	cfg      Config
+	wallabag *wallabagClient
 	static   fs.FS
 	progress *progressStore
 	notes    *notesStore
 }
 
-// New configures the wallabago client and returns a ready-to-run http.Server.
+// New configures the Wallabag client and returns a ready-to-run http.Server.
 func New(cfg Config) *http.Server {
-	wallabago.SetConfig(wallabago.NewWallabagConfig(
-		cfg.WallabagURL,
-		cfg.WallabagClientID,
-		cfg.WallabagClientSecret,
-		cfg.WallabagUsername,
-		cfg.WallabagPassword,
-	))
-
 	staticFS, err := fs.Sub(web.Static, "static")
 	if err != nil {
 		panic(err)
 	}
 	s := &Server{
 		cfg:      cfg,
+		wallabag: newWallabagClient(cfg),
 		static:   staticFS,
 		progress: newProgressStore(cfg.DataDir),
 		notes:    newNotesStore(cfg.DataDir),

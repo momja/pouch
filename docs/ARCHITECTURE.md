@@ -15,7 +15,8 @@ cmd/mockwallabag/main.go   In-memory fake Wallabag API for dev/browser tests
 internal/server/
   config.go                Config struct + ConfigFromEnv (env vars only)
   server.go                Routes, static file serving with SPA fallback
-  api.go                   REST handlers, wallabago glue, quick-add HTML page
+  api.go                   REST handlers, response mapping, quick-add HTML page
+  wallabag.go              Per-server HTTP client and OAuth token recovery
   progress.go              Scroll-memory store (JSON file under POUCH_DATA_DIR)
   notes.go                 Inline-note store (JSON file under POUCH_DATA_DIR)
 web/
@@ -33,20 +34,31 @@ docker-compose.example.yml Traefik-labelled reference deployment
 
 ## Backend
 
-### wallabago usage and its quirks
+### Wallabag client and token recovery
 
-- `wallabago.SetConfig(...)` is called once in `server.New`; the library keeps
-  package-global state (config + oauth token, refreshed automatically).
-- Listing uses `wallabago.GetEntries(wallabago.APICall, archive, starred, "created",
-  "desc", page, perPage, tag, -1, -1, "metadata", "")`. Passing `-1` for
-  archive/starred skips those filters; `detail=metadata` keeps list payloads light
-  (server omits content).
-- **Quirk:** `wallabago.APICall` returns `(nil, nil)` when Wallabag answers a
-  non-200 status. `internal/server/api.go:apiCall` wraps it and converts that case
-  into a real error. Use the wrapper for any direct calls.
-- Create (POST), update (PATCH) and delete of entries are done with `apiCall`
-  directly rather than `wallabago.PostEntry`, because the wrapper's helpers throw
-  away the response body and Pouch wants the created/updated entry JSON.
+- `internal/server/wallabag.go` owns an HTTP client and OAuth tokens per server.
+  wallabago supplies response types and timestamp parsing only; its global
+  config/token and HTTP helpers are not used.
+- Every upstream route (list, content, tags, create, patch, delete, quick-add)
+  goes through `wallabagClient.apiCall`. Lists request `detail=metadata` and
+  preserve archive/starred filters, sorting, pagination, and encoded tag names.
+- Authentication is serialized; concurrent requests share the acquired token.
+  Expired access tokens use the refresh grant. HTTP 400/401 on refresh discards
+  the rejected token and attempts the configured password grant once before
+  dispatching the API request. A failed fallback leaves the token cleared so
+  later requests can recover without restarting Pouch.
+- Transport failures, rate limits, server errors, and malformed token responses
+  do not trigger password fallback. Authentication failures have a one-second
+  cooldown to bound concurrent retries; later requests try again. Requests have
+  a 30-second HTTP timeout and inherit the incoming request's cancellation.
+- API requests are never retried, including on 401 or transport errors: a
+  mutation may already have taken effect. Redirects are rejected. An access
+  token rejected before its local expiry therefore still requires expiry or a
+  restart; automatic API-401 recovery is outside this fix.
+- All 2xx API responses are accepted (including create/delete statuses).
+  OAuth response bodies and transport errors containing URLs are not exposed
+  to the frontend or logs. `/healthz` remains process liveness; it does not
+  verify Wallabag connectivity or authentication.
 - Wallabag timestamps use a nonstandard layout (`2006-01-02T15:04:05-0700`);
   wallabago parses it into `WallabagTime`. `entry.CreatedAt` is re-emitted to the
   frontend as RFC3339.

@@ -3,7 +3,7 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 const PER_PAGE = 30;
 
 const FILTERS = {
