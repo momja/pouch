@@ -43,8 +43,9 @@ WALLABAG_USERNAME=mock WALLABAG_PASSWORD=mock go run ./cmd/pouch
 - New themes = a `:root[data-theme="…"]` block in `style.css` + swatch buttons in
   both `#themeSwatches` and `#typoSwatches` (swatch colors are hardcoded in the
   `.swatch[data-theme-pick=…]` rules).
-- Backend: keep handlers thin; anything touching wallabago's non-200 quirk goes
-  through `apiCall` in `internal/server/api.go`.
+- Backend: keep handlers thin; all upstream requests go through
+  `wallabagClient.apiCall` in `internal/server/wallabag.go`. Use wallabago only
+  for response types, never its package-global config/token or HTTP helpers.
 - No auth in Pouch by owner decision — don't add login flows; access control
   belongs to the reverse proxy.
 
